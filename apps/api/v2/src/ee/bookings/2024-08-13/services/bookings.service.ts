@@ -25,7 +25,6 @@ import { DateTime } from "luxon";
 import { z } from "zod";
 
 import {
-  handleNewRecurringBooking,
   getTranslation,
   getAllUserBookings,
   handleInstantMeeting,
@@ -394,7 +393,8 @@ export class BookingsService_2024_08_13 {
     eventType: EventTypeWithOwnerAndTeam
   ) {
     const bookingRequest = await this.inputService.createRecurringBookingRequest(request, body, eventType);
-    const bookings = await handleNewRecurringBooking({
+    const bookingService = getBookingCreateService();
+    const bookings = await bookingService.createRecurringBooking({
       bookingData: bookingRequest.body,
       userId: bookingRequest.userId,
       hostname: bookingRequest.headers?.host || "",
@@ -416,7 +416,8 @@ export class BookingsService_2024_08_13 {
     eventType: EventTypeWithOwnerAndTeam
   ) {
     const bookingRequest = await this.inputService.createRecurringBookingRequest(request, body, eventType);
-    const bookings = await handleNewRecurringBooking({
+    const bookingService = getBookingCreateService();
+    const bookings = await bookingService.createRecurringBooking({
       bookingData: bookingRequest.body,
       userId: bookingRequest.userId,
       hostname: bookingRequest.headers?.host || "",

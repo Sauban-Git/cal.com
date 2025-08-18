@@ -1,15 +1,12 @@
 import type getBookingDataSchema from "@calcom/features/bookings/lib/getBookingDataSchema";
 import type getBookingDataSchemaForApi from "@calcom/features/bookings/lib/getBookingDataSchemaForApi";
 import type { HandleNewBookingService } from "@calcom/features/bookings/lib/handleNewBooking";
-import { handleNewRecurringBooking } from "@calcom/features/bookings/lib/handleNewRecurringBooking";
+import type { BookingResponse } from "@calcom/features/bookings/types";
 import handleInstantMeeting from "@calcom/features/instant-meeting/handleInstantMeeting";
+import { SchedulingType } from "@calcom/prisma/client";
+import type { AppsStatus } from "@calcom/types/Calendar";
 
-import type {
-  CreateBookingInput,
-  CreateRecurringBookingInput,
-  CreateInstantBookingInput,
-} from "./BookingCreateTypes";
-import type { IBookingCreateService } from "./IBookingCreateService";
+import type { CreateBookingInput, CreateInstantBookingInput } from "./BookingCreateTypes";
 
 // Type for schema getter functions used in booking validation
 // Properly typed to match what HandleNewBookingService expects
@@ -22,13 +19,8 @@ type ExternalBookingData = Record<string, unknown>;
 // We maintain type safety at our boundary and cast where necessary
 type HandleNewBookingInput = Record<string, unknown>;
 
-// Type for recurring booking handler input
-type RecurringBookingHandlerInput = {
-  bookingData: Record<string, unknown>[];
-  userId?: number;
-  hostname?: string;
-  forcedSlug?: string;
-  noEmail?: boolean;
+// Type for recurring booking handler input - copied from handleNewRecurringBooking
+type PlatformParams = {
   platformClientId?: string;
   platformCancelUrl?: string;
   platformBookingUrl?: string;
@@ -36,6 +28,15 @@ type RecurringBookingHandlerInput = {
   platformBookingLocation?: string;
   areCalendarEventsEnabled?: boolean;
 };
+
+type RecurringBookingHandlerInput = {
+  bookingData: Record<string, any>[];
+  userId?: number;
+  // These used to come from headers but now we're passing them as params
+  hostname?: string;
+  forcedSlug?: string;
+  noEmail?: boolean;
+} & PlatformParams;
 
 // Minimal NextApiRequest shape needed for instant meetings
 type InstantMeetingRequest = {
@@ -50,7 +51,7 @@ export interface IBookingCreateServiceDependencies {
   handleNewBookingService: HandleNewBookingService;
 }
 
-export class BookingCreateService implements IBookingCreateService {
+export class BookingCreateService {
   constructor(private readonly dependencies: IBookingCreateServiceDependencies) {}
 
   async createBooking(input: { bookingData: ExternalBookingData; schemaGetter?: BookingDataSchemaGetter }) {
@@ -63,16 +64,116 @@ export class BookingCreateService implements IBookingCreateService {
     return this.dependencies.handleNewBookingService.handle(handlerInput, schemaGetter);
   }
 
-  async createRecurringBooking(input: { bookingData: CreateRecurringBookingInput }) {
-    const { bookingData } = input;
+  async createRecurringBooking(input: RecurringBookingHandlerInput): Promise<BookingResponse[]> {
+    const data = input.bookingData;
+    const createdBookings: BookingResponse[] = [];
+    const allRecurringDates: { start: string | undefined; end: string | undefined }[] = data.map(
+      (booking) => {
+        return { start: booking.start, end: booking.end };
+      }
+    );
+    const appsStatus: AppsStatus[] | undefined = undefined;
 
-    // handleNewRecurringBooking expects an array of booking data
-    // We adapt our single booking input to match the expected format
-    const recurringInput: RecurringBookingHandlerInput = {
-      bookingData: [bookingData as unknown as Record<string, unknown>],
+    const numSlotsToCheckForAvailability = 1;
+
+    let thirdPartyRecurringEventId = null;
+
+    // for round robin, the first slot needs to be handled first to define the lucky user
+    const firstBooking = data[0];
+    const isRoundRobin = firstBooking.schedulingType === SchedulingType.ROUND_ROBIN;
+
+    let luckyUsers = undefined;
+
+    const handleBookingMeta = {
+      userId: input.userId,
+      platformClientId: input.platformClientId,
+      platformRescheduleUrl: input.platformRescheduleUrl,
+      platformCancelUrl: input.platformCancelUrl,
+      platformBookingUrl: input.platformBookingUrl,
+      platformBookingLocation: input.platformBookingLocation,
+      areCalendarEventsEnabled: input.areCalendarEventsEnabled,
     };
-    // Use type assertion for compatibility with legacy function signature
-    return handleNewRecurringBooking(recurringInput as Parameters<typeof handleNewRecurringBooking>[0]);
+
+    if (isRoundRobin) {
+      const recurringEventData = {
+        ...firstBooking,
+        appsStatus,
+        allRecurringDates,
+        isFirstRecurringSlot: true,
+        thirdPartyRecurringEventId,
+        numSlotsToCheckForAvailability,
+        currentRecurringIndex: 0,
+        noEmail: input.noEmail !== undefined ? input.noEmail : false,
+      };
+
+      const firstBookingResult = await this.createBooking({
+        bookingData: {
+          bookingData: recurringEventData,
+          hostname: input.hostname || "",
+          forcedSlug: input.forcedSlug as string | undefined,
+          ...handleBookingMeta,
+        },
+      });
+      luckyUsers = (firstBookingResult as any).luckyUsers;
+    }
+
+    for (let key = isRoundRobin ? 1 : 0; key < data.length; key++) {
+      const booking = data[key];
+      // Disable AppStatus in Recurring Booking Email as it requires us to iterate backwards to be able to compute the AppsStatus for all the bookings except the very first slot and then send that slot's email with statuses
+      // It is also doubtful that how useful is to have the AppsStatus of all the bookings in the email.
+      // It is more important to iterate forward and check for conflicts for only first few bookings defined by 'numSlotsToCheckForAvailability'
+      // if (key === 0) {
+      //   const calcAppsStatus: { [key: string]: AppsStatus } = createdBookings
+      //     .flatMap((book) => (book.appsStatus !== undefined ? book.appsStatus : []))
+      //     .reduce((prev, curr) => {
+      //       if (prev[curr.type]) {
+      //         prev[curr.type].failures += curr.failures;
+      //         prev[curr.type].success += curr.success;
+      //       } else {
+      //         prev[curr.type] = curr;
+      //       }
+      //       return prev;
+      //     }, {} as { [key: string]: AppsStatus });
+      //   appsStatus = Object.values(calcAppsStatus);
+      // }
+
+      const recurringEventData = {
+        ...booking,
+        appsStatus,
+        allRecurringDates,
+        isFirstRecurringSlot: key == 0,
+        thirdPartyRecurringEventId,
+        numSlotsToCheckForAvailability,
+        currentRecurringIndex: key,
+        noEmail: input.noEmail !== undefined ? input.noEmail : key !== 0,
+        luckyUsers,
+      };
+
+      const promiseEachRecurringBooking = this.createBooking({
+        bookingData: {
+          hostname: input.hostname || "",
+          forcedSlug: input.forcedSlug as string | undefined,
+          bookingData: recurringEventData,
+          ...handleBookingMeta,
+        },
+      });
+
+      const eachRecurringBooking = await promiseEachRecurringBooking;
+
+      createdBookings.push(eachRecurringBooking as BookingResponse);
+
+      if (!thirdPartyRecurringEventId) {
+        if ((eachRecurringBooking as any).references && (eachRecurringBooking as any).references.length > 0) {
+          for (const reference of (eachRecurringBooking as any).references!) {
+            if (reference.thirdPartyRecurringEventId) {
+              thirdPartyRecurringEventId = reference.thirdPartyRecurringEventId;
+              break;
+            }
+          }
+        }
+      }
+    }
+    return createdBookings;
   }
 
   async createInstantBooking(input: { bookingData: CreateInstantBookingInput }) {

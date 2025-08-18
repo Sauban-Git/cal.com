@@ -23,11 +23,10 @@ import { v4 as uuidv4 } from "uuid";
 import { describe, expect } from "vitest";
 
 import { WEBAPP_URL, WEBSITE_URL } from "@calcom/lib/constants";
+import { getBookingCreateService } from "@calcom/lib/di/containers/BookingCreate";
 import logger from "@calcom/lib/logger";
 import { BookingStatus, SchedulingType } from "@calcom/prisma/enums";
 import { test } from "@calcom/web/test/fixtures/fixtures";
-
-import { handleNewRecurringBooking } from "../../handleNewRecurringBooking";
 
 const DAY_IN_MS = 1000 * 60 * 60 * 24;
 
@@ -153,8 +152,9 @@ describe("handleNewRecurringBooking", () => {
               };
             });
 
-          // Call handleNewRecurringBooking directly instead of through API
-          const createdBookings = await handleNewRecurringBooking({
+          // Call createRecurringBooking directly instead of through API
+          const bookingService = getBookingCreateService();
+          const createdBookings = await bookingService.createRecurringBooking({
             bookingData: bookingDataArray,
             userId: -1, // Simulating anonymous user like in the API test
           });
@@ -371,9 +371,10 @@ describe("handleNewRecurringBooking", () => {
               };
             });
 
+          const bookingService = getBookingCreateService();
           await expect(
             async () =>
-              await handleNewRecurringBooking({
+              await bookingService.createRecurringBooking({
                 bookingData: bookingDataArray,
                 userId: -1,
               })
